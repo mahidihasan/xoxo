@@ -78,7 +78,10 @@ app.post("/api/info", async (req, res) => {
     const duration = info.duration_string || formatDuration(info.duration);
     const thumb = info.thumbnail || null;
 
-    const formats = buildFormats(info, type || "video", url, title);
+    let formats = buildFormats(info, type || "video", url, title);
+    if (!Array.isArray(formats) || formats.length === 0) {
+      formats = buildDefaultFormats(type || "video", url, title, info);
+    }
 
     res.json({
       title,
@@ -269,6 +272,36 @@ function buildFormats(info, type, sourceUrl, title) {
       type: "video",
     };
   });
+}
+
+function buildDefaultFormats(type, sourceUrl, title, info) {
+  if (type === "audio") {
+    return [{
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp3")}`,
+      label: "Best audio",
+      ext: "mp3",
+      type: "audio",
+    }];
+  }
+
+  if (type === "image") {
+    const thumb = info && info.thumbnail;
+    if (thumb) {
+      return [{
+        url: `/api/download?direct=${encodeURIComponent(thumb)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(thumb) || "jpg")}`,
+        label: "Original",
+        ext: guessExt(thumb) || "jpg",
+        type: "image",
+      }];
+    }
+  }
+
+  return [{
+    url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestvideo*+bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp4")}`,
+    label: "Best available",
+    ext: "mp4",
+    type: "video",
+  }];
 }
 
 function uniqueBy(list, keyFn) {

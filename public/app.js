@@ -138,10 +138,6 @@ async function fetchMedia() {
       mediaInfo = generateMockData(url, type, platform);
     }
 
-    if (!mediaInfo || !Array.isArray(mediaInfo.formats) || mediaInfo.formats.length === 0) {
-      throw new Error("No quality options found for this URL. Try switching Video/Audio/Image and fetch again.");
-    }
-
     lastUrl = url;
     renderResult(mediaInfo, type, platform, url);
 
