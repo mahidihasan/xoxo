@@ -10,6 +10,9 @@ const fs = require("fs");
 
 const PORT = process.env.PORT || 3000;
 const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
+const YTDLP_COOKIES = process.env.YTDLP_COOKIES || "";
+const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=android,web";
+const YTDLP_FORCE_IPV4 = String(process.env.YTDLP_FORCE_IPV4 || "false").toLowerCase() === "true";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
@@ -86,6 +89,11 @@ app.post("/api/info", async (req, res) => {
     });
   } catch (err) {
     const msg = err.message || "Failed to fetch media info";
+    if (isYouTubeBlockedError(msg)) {
+      return res.status(429).json({
+        error: "YouTube is rate-limiting this server right now. Try another video, wait a few minutes, or configure YTDLP_COOKIES on the backend."
+      });
+    }
     res.status(500).json({ error: msg });
   }
 });
@@ -148,7 +156,11 @@ module.exports = app;
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpBin();
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const extraArgs = [];
+    if (YTDLP_FORCE_IPV4) extraArgs.push("-4");
+    if (YTDLP_EXTRACTOR_ARGS) extraArgs.push("--extractor-args", YTDLP_EXTRACTOR_ARGS);
+    if (YTDLP_COOKIES) extraArgs.push("--cookies", YTDLP_COOKIES);
+    const child = spawn(bin, [...extraArgs, ...args], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
 
@@ -346,6 +358,11 @@ function detectPlatform(url) {
   
 
   return "unknown";
+}
+
+function isYouTubeBlockedError(message) {
+  if (!message) return false;
+  return /Too Many Requests|Sign in to confirm you're not a bot|Sign in to confirm you’re not a bot|HTTP Error 429/i.test(message);
 }
 
 function isValidUrl(value) {

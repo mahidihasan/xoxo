@@ -155,8 +155,12 @@ async function fetchFromBackend(url, type, platform) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, type }),
   });
-  if (!resp.ok) throw new Error(`Backend error: ${resp.status}`);
-  return resp.json();
+  const payload = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const detail = payload && payload.error ? payload.error : `Backend error: ${resp.status}`;
+    throw new Error(detail);
+  }
+  return payload;
 }
 
 /* --------- RapidAPI routing --------- */
