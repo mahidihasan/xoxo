@@ -311,7 +311,11 @@ function renderResult(info, type, platform, sourceURL) {
     image: iconMarkup("i-image"),
   };
 
-  info.formats.forEach(fmt => {
+  const formats = Array.isArray(info.formats) && info.formats.length > 0
+    ? info.formats
+    : [buildClientDefaultFormat(type, sourceURL, info.title || "download")];
+
+  formats.forEach(fmt => {
     const icon    = TYPE_ICONS[fmt.type] || iconMarkup("i-download");
     const btn     = document.createElement("div");
     btn.className = `dl-btn ${fmt.type}`;
@@ -333,6 +337,36 @@ function renderResult(info, type, platform, sourceURL) {
 
   // Update toolbar active state
   setActiveType(type);
+}
+
+function buildClientDefaultFormat(type, sourceURL, title) {
+  const safeTitle = encodeURIComponent(title || "download");
+  const safeUrl = encodeURIComponent(sourceURL);
+
+  if (type === "audio") {
+    return {
+      url: `${API_CONFIG.backend_url}/download?url=${safeUrl}&format=${encodeURIComponent("bestaudio/best")}&title=${safeTitle}&ext=mp3`,
+      label: "Original Standard",
+      ext: "mp3",
+      type: "audio",
+    };
+  }
+
+  if (type === "image") {
+    return {
+      url: `${API_CONFIG.backend_url}/download?url=${safeUrl}&format=${encodeURIComponent("best")}&title=${safeTitle}&ext=jpg`,
+      label: "Original Standard",
+      ext: "jpg",
+      type: "image",
+    };
+  }
+
+  return {
+    url: `${API_CONFIG.backend_url}/download?url=${safeUrl}&format=${encodeURIComponent("bestvideo*+bestaudio/best")}&title=${safeTitle}&ext=mp4`,
+    label: "Original Standard",
+    ext: "mp4",
+    type: "video",
+  };
 }
 
 /* --------- Trigger download --------- */
