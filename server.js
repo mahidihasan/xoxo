@@ -222,11 +222,14 @@ function basicAuthMiddleware(req, res, next) {
 
 function buildFormats(info, type, sourceUrl, title) {
   if (type === "image") {
-    const thumbs = Array.isArray(info.thumbnails) ? info.thumbnails : [];
+    const thumbs = Array.isArray(info.thumbnails) ? [...info.thumbnails] : [];
+    if (info.thumbnail) {
+      thumbs.push({ url: info.thumbnail, width: info.width || 0 });
+    }
     const sorted = thumbs
       .filter(t => t && t.url)
       .sort((a, b) => (b.width || 0) - (a.width || 0));
-    const list = sorted.slice(0, 20);
+    const list = uniqueBy(sorted, t => t.url).slice(0, 20);
     return list.map((t) => ({
       url: `/api/download?direct=${encodeURIComponent(t.url)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(t.url) || "jpg")}`,
       label: t.width ? `${t.width}px` : "Image",
@@ -235,32 +238,49 @@ function buildFormats(info, type, sourceUrl, title) {
     }));
   }
 
-  const formats = Array.isArray(info.formats) ? info.formats : [];
+  const formats = (Array.isArray(info.formats) ? info.formats : []).filter(f => f && f.format_id);
 
   if (type === "audio") {
-    const audio = formats
-      .filter(f => f.acodec && f.acodec !== "none" && f.vcodec === "none" && f.url)
-      .sort((a, b) => (b.abr || 0) - (a.abr || 0))
+    const audioOnly = formats.filter(f => f.acodec && f.acodec !== "none" && (f.vcodec === "none" || !f.vcodec));
+    const audioFallback = formats.filter(f => f.acodec && f.acodec !== "none");
+    const audio = (audioOnly.length ? audioOnly : audioFallback)
+      .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))
       .slice(0, 20);
-    return audio.map((f) => ({
-      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(f.format_id)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || "mp3")}`,
+    return uniqueBy(audio, f => f.format_id).map((f) => ({
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(f.format_id)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || f.audio_ext || "m4a")}`,
       label: f.abr ? `${Math.round(f.abr)} kbps` : "Audio",
-      ext: f.ext || "mp3",
+      ext: f.ext || f.audio_ext || "m4a",
       type: "audio",
     }));
   }
 
-  const video = formats
-    .filter(f => f.vcodec && f.vcodec !== "none" && f.acodec && f.acodec !== "none" && f.url)
+  const videoCombined = formats.filter(f => f.vcodec && f.vcodec !== "none" && f.acodec && f.acodec !== "none");
+  const videoOnly = formats.filter(f => f.vcodec && f.vcodec !== "none" && (f.acodec === "none" || !f.acodec));
+  const selected = (videoCombined.length ? videoCombined : videoOnly)
     .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.tbr || 0) - (a.tbr || 0))
     .slice(0, 20);
 
-  return video.map((f) => ({
-    url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(f.format_id)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || "mp4")}`,
-    label: f.height ? `${f.height}p` : "Video",
-    ext: f.ext || "mp4",
-    type: "video",
-  }));
+  return uniqueBy(selected, f => f.format_id).map((f) => {
+    const formatSelector = (videoCombined.length || !videoOnly.length) ? f.format_id : `${f.format_id}+bestaudio/best`;
+    return {
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(formatSelector)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || "mp4")}`,
+      label: f.height ? `${f.height}p` : (f.format_note || "Video"),
+      ext: f.ext || "mp4",
+      type: "video",
+    };
+  });
+}
+
+function uniqueBy(list, keyFn) {
+  const seen = new Set();
+  const output = [];
+  for (const item of list) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    output.push(item);
+  }
+  return output;
 }
 
 function detectPlatform(url) {
