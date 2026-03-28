@@ -8,3 +8,5 @@ services:
     envVars:
       - key: YTDLP_BIN
         value: bin/yt-dlp
+      - key: YTDLP_DISABLE_STATIC
+        value: "true"

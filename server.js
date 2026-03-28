@@ -12,6 +12,7 @@ const path = require("path");
 
 const PORT = process.env.PORT || 3000;
 const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
+const YTDLP_BIN_CONFIG = process.env.YTDLP_BIN || "";
 const YTDLP_COOKIES = process.env.YTDLP_COOKIES || "";
 const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=android,web";
 const YTDLP_FORCE_IPV4 = String(process.env.YTDLP_FORCE_IPV4 || "false").toLowerCase() === "true";
@@ -59,16 +60,29 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.get("/api/runtime", (_req, res) => {
-  const resolved = resolveYtDlpBin();
-  res.json({
-    ok: true,
-    node: process.version,
-    platform: process.platform,
-    ytdlpBinConfigured: YTDLP_BIN || null,
-    ytdlpResolvedPath: resolved,
-    ytdlpResolvedExists: !!(resolved && fs.existsSync(resolved)),
-    ytdlpResolvedBase: resolved ? path.basename(resolved) : null,
-  });
+  try {
+    const resolved = resolveYtDlpBin();
+    res.json({
+      ok: true,
+      node: process.version,
+      platform: process.platform,
+      ytdlpBinConfigured: YTDLP_BIN_CONFIG || null,
+      ytdlpResolvedPath: resolved,
+      ytdlpResolvedExists: !!(resolved && fs.existsSync(resolved)),
+      ytdlpResolvedBase: resolved ? path.basename(resolved) : null,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || "runtime check failed" });
+  }
+});
+
+app.get("/api/selftest", async (_req, res) => {
+  try {
+    const version = await runYtDlp(["--version"]);
+    res.json({ ok: true, version });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || "selftest failed" });
+  }
 });
 
 const limiter = rateLimit({
@@ -188,6 +202,9 @@ module.exports = app;
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpBin();
+    if (YTDLP_BIN_CONFIG && !fs.existsSync(bin)) {
+      return reject(new Error(`YTDLP_BIN is set but file not found at: ${bin}`));
+    }
     const extraArgs = [];
     if (YTDLP_FORCE_IPV4) extraArgs.push("-4");
     if (YTDLP_EXTRACTOR_ARGS) extraArgs.push("--extractor-args", YTDLP_EXTRACTOR_ARGS);
@@ -221,6 +238,8 @@ function runYtDlp(args) {
 }
 
 function resolveYtDlpBin() {
+  if (YTDLP_BIN_CONFIG) return YTDLP_BIN_CONFIG;
+
   const bundled = resolveBundledYtDlpBin();
   if (bundled) return bundled;
 
