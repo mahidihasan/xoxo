@@ -6,7 +6,9 @@ const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 const { spawn } = require("child_process");
 const { Readable } = require("stream");
+const { pipeline } = require("stream/promises");
 const fs = require("fs");
+const path = require("path");
 
 const PORT = process.env.PORT || 3000;
 const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
@@ -52,6 +54,19 @@ app.get("/health", (_req, res) => {
 });
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/api/runtime", (_req, res) => {
+  const resolved = resolveYtDlpBin();
+  res.json({
+    ok: true,
+    node: process.version,
+    platform: process.platform,
+    ytdlpBinConfigured: YTDLP_BIN || null,
+    ytdlpResolvedPath: resolved,
+    ytdlpResolvedExists: !!(resolved && fs.existsSync(resolved)),
+    ytdlpResolvedBase: resolved ? path.basename(resolved) : null,
+  });
 });
 
 const limiter = rateLimit({
@@ -141,8 +156,20 @@ app.get("/api/download", async (req, res) => {
     }
     res.setHeader("Cache-Control", "no-store");
 
+    if (!resp.body) {
+      return res.status(502).json({ error: "Upstream returned an empty body" });
+    }
+
     const nodeStream = Readable.fromWeb(resp.body);
-    nodeStream.pipe(res);
+    nodeStream.on("error", (streamErr) => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: streamErr.message || "Stream failed" });
+      } else {
+        res.destroy(streamErr);
+      }
+    });
+
+    await pipeline(nodeStream, res);
   } catch (err) {
     res.status(500).json({ error: err.message || "Download failed" });
   }
