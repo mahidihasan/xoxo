@@ -23,6 +23,8 @@ const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || "";
 
 const app = express();
 app.disable("x-powered-by");
+// Required behind reverse proxies (Render/Vercel) for correct client IP/rate-limit behavior.
+app.set("trust proxy", 1);
 app.use(helmet({
   crossOriginResourcePolicy: false,
   contentSecurityPolicy: {
@@ -227,6 +229,7 @@ function resolveYtDlpBin() {
     "C:\\Users\\Asus\\AppData\\Local\\Microsoft\\WinGet\\Packages\\yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe\\yt-dlp.exe",
     "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
     "C:\\Program Files (x86)\\yt-dlp\\yt-dlp.exe",
+    "/opt/render/project/.local/bin/yt-dlp",
     "/usr/bin/yt-dlp",
     "/usr/local/bin/yt-dlp",
     "/opt/homebrew/bin/yt-dlp"
@@ -238,6 +241,11 @@ function resolveYtDlpBin() {
 }
 
 function resolveBundledYtDlpBin() {
+  if (process.platform === "linux") {
+    // yt-dlp-static fails on some Linux targets used by PaaS providers.
+    return "";
+  }
+
   try {
     const bundled = require("yt-dlp-static");
     if (typeof bundled === "string" && fs.existsSync(bundled)) {
