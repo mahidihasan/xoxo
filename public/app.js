@@ -120,26 +120,45 @@ async function fetchMedia() {
   const platform = detectPlatform(url);
 
   // Validate URL format
-  try { new URL(url); } catch { showError("Invalid URL - check the format."); return; }
+  try {
+    // Trigger direct download (avoid new tab redirects on mobile)
+    const a = document.createElement("a");
+    a.href = fmt.url;
+    a.download = `${sanitizeFilename(title || "download")}.${fmt.ext}`;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    clearInterval(interval);
+    fillEl.style.width = "100%";
+    pctEl.textContent  = "100%";
+    labelEl.textContent = "Download started";
+    showToast("Download started");
+
+  } catch { showError("Invalid URL - check the format."); return; }
 
   // Loading state
   setLoading(true);
   document.getElementById("resultCard").style.display = "none";
 
   try {
-    /* --------- Route to appropriate API --------- */
-    let mediaInfo;
-    if (API_CONFIG.use_backend) {
-      mediaInfo = await fetchFromBackend(url, type, platform);
-    } else if (API_CONFIG.rapidapi_key !== "YOUR_RAPIDAPI_KEY_HERE") {
-      mediaInfo = await fetchFromRapidAPI(url, type, platform);
-    } else {
-      // Demo mode - generate mock data
-      mediaInfo = generateMockData(url, type, platform);
-    }
+    // Trigger direct download (avoid new tab redirects on mobile)
+    const a = document.createElement("a");
+    a.href = fmt.url;
+    a.download = `${sanitizeFilename(title || "download")}.${fmt.ext}`;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 
-    lastUrl = url;
-    renderResult(mediaInfo, type, platform, url);
+    clearInterval(interval);
+    fillEl.style.width = "100%";
+    pctEl.textContent  = "100%";
+    labelEl.textContent = "Download started";
+    showToast("Download started");
 
   } catch (err) {
     showError(err.message || "Failed to fetch media info. Check the URL or API key.");
@@ -394,31 +413,23 @@ async function triggerDownload(fmt, title, sourceURL, isDemo) {
   }, 200);
 
   try {
-    // Fetch blob
-    const resp = await fetch(fmt.url);
-    if (!resp.ok) throw new Error("Download failed");
-    const blob = await resp.blob();
+    // Trigger direct download (avoid new tab redirects on mobile)
+    const a = document.createElement("a");
+    a.href = fmt.url;
+    a.download = `${sanitizeFilename(title || "download")}.${fmt.ext}`;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 
     clearInterval(interval);
     fillEl.style.width = "100%";
     pctEl.textContent  = "100%";
-    labelEl.textContent = "Complete!";
+    labelEl.textContent = "Download started";
+    showToast("Download started");
 
-    // Trigger save
-    const a   = document.createElement("a");
-    a.href    = URL.createObjectURL(blob);
-    a.download = `${sanitizeFilename(title || "download")}.${fmt.ext}`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-
-    showToast("Download complete!");
-
-  } catch (err) {
-    clearInterval(interval);
-    // Fallback: open in new tab
-    window.open(fmt.url, "_blank");
-    showToast("Opened in new tab");
-  } finally {
+  } catch (err) {\n    clearInterval(interval);\n    showToast(err.message || "Download failed");\n  } finally {
     setTimeout(() => {
       progressEl.style.display = "none";
       fillEl.style.width = "0%";
@@ -495,3 +506,5 @@ document.getElementById("fetchBtn").addEventListener("click", () => {
 document.getElementById("urlInput").addEventListener("keydown", e => {
   if (e.key === "Enter") fetchMedia();
 });
+
+
