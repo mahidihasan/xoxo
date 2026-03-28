@@ -6,7 +6,8 @@
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "node scripts/install-ytdlp.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

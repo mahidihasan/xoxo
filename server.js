@@ -241,10 +241,8 @@ function resolveYtDlpBin() {
 }
 
 function resolveBundledYtDlpBin() {
-  if (process.platform === "linux") {
-    // yt-dlp-static fails on some Linux targets used by PaaS providers.
-    return "";
-  }
+  const disableStatic = String(process.env.YTDLP_DISABLE_STATIC || "false").toLowerCase() === "true";
+  if (disableStatic) return "";
 
   try {
     const bundled = require("yt-dlp-static");

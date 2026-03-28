@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: xoxo-downloader
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run start
+    envVars:
+      - key: YTDLP_BIN
+        value: bin/yt-dlp

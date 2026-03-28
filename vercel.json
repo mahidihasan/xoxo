@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "env": {
+    "YTDLP_BIN": "bin/yt-dlp"
+  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/public/index.html" }
   ],
