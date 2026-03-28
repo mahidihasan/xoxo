@@ -192,16 +192,37 @@ function runYtDlp(args) {
 }
 
 function resolveYtDlpBin() {
+  const bundled = resolveBundledYtDlpBin();
+  if (bundled) return bundled;
+
   if (YTDLP_BIN && fs.existsSync(YTDLP_BIN)) return YTDLP_BIN;
   const candidates = [
     "C:\\Users\\Asus\\AppData\\Local\\Microsoft\\WinGet\\Packages\\yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe\\yt-dlp.exe",
     "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
-    "C:\\Program Files (x86)\\yt-dlp\\yt-dlp.exe"
+    "C:\\Program Files (x86)\\yt-dlp\\yt-dlp.exe",
+    "/usr/bin/yt-dlp",
+    "/usr/local/bin/yt-dlp",
+    "/opt/homebrew/bin/yt-dlp"
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
   }
   return "yt-dlp";
+}
+
+function resolveBundledYtDlpBin() {
+  try {
+    const bundled = require("yt-dlp-static");
+    if (typeof bundled === "string" && fs.existsSync(bundled)) {
+      return bundled;
+    }
+    if (bundled && bundled.path && fs.existsSync(bundled.path)) {
+      return bundled.path;
+    }
+  } catch (_err) {
+    // Optional dependency path resolution; fall back to env/PATH checks.
+  }
+  return "";
 }
 
 function basicAuthMiddleware(req, res, next) {
