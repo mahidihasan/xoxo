@@ -9,13 +9,18 @@ const { Readable } = require("stream");
 const { pipeline } = require("stream/promises");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const PORT = process.env.PORT || 3000;
 const YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
 const YTDLP_BIN_CONFIG = process.env.YTDLP_BIN || "";
 const YTDLP_COOKIES = process.env.YTDLP_COOKIES || "";
+const YTDLP_COOKIES_TEXT = process.env.YTDLP_COOKIES_TEXT || "";
+const YTDLP_COOKIES_B64 = process.env.YTDLP_COOKIES_B64 || "";
 const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=android,web";
 const YTDLP_FORCE_IPV4 = String(process.env.YTDLP_FORCE_IPV4 || "false").toLowerCase() === "true";
+const FFMPEG_BIN = process.env.FFMPEG_BIN || "";
+const FFMPEG_DISABLE_STATIC = String(process.env.FFMPEG_DISABLE_STATIC || "false").toLowerCase() === "true";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
@@ -62,6 +67,8 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/runtime", (_req, res) => {
   try {
     const resolved = resolveYtDlpBin();
+    const ffmpeg = resolveFfmpegBin();
+    const cookiesInfo = resolveCookiesFile();
     res.json({
       ok: true,
       node: process.version,
@@ -70,6 +77,11 @@ app.get("/api/runtime", (_req, res) => {
       ytdlpResolvedPath: resolved,
       ytdlpResolvedExists: !!(resolved && fs.existsSync(resolved)),
       ytdlpResolvedBase: resolved ? path.basename(resolved) : null,
+      ffmpegBinConfigured: FFMPEG_BIN || null,
+      ffmpegResolvedPath: ffmpeg,
+      ffmpegResolvedExists: !!(ffmpeg && fs.existsSync(ffmpeg)),
+      cookiesConfigured: !!(cookiesInfo && cookiesInfo.path),
+      cookiesSource: cookiesInfo ? cookiesInfo.source : null,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message || "runtime check failed" });
@@ -141,6 +153,7 @@ app.get("/api/download", async (req, res) => {
     const ext = req.query.ext || "";
 
     let downloadUrl = null;
+    let multiStream = false;
     if (direct) {
       if (!isValidUrl(direct)) {
         return res.status(400).json({ error: "Invalid direct URL" });
@@ -151,10 +164,22 @@ app.get("/api/download", async (req, res) => {
         return res.status(400).json({ error: "Missing url or format" });
       }
       const out = await runYtDlp(["-f", String(formatId), "-g", "--no-playlist", sourceUrl]);
-      downloadUrl = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
+      const lines = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      downloadUrl = lines[0];
+      multiStream = lines.length > 1;
       if (!downloadUrl) {
         return res.status(500).json({ error: "Failed to resolve download URL" });
       }
+    }
+
+    if (!direct && multiStream) {
+      return await downloadAndMergeWithYtDlp({
+        res,
+        sourceUrl,
+        formatId: String(formatId),
+        title,
+        ext,
+      });
     }
 
     const resp = await fetch(downloadUrl, { redirect: "follow" });
@@ -208,7 +233,8 @@ function runYtDlp(args) {
     const extraArgs = [];
     if (YTDLP_FORCE_IPV4) extraArgs.push("-4");
     if (YTDLP_EXTRACTOR_ARGS) extraArgs.push("--extractor-args", YTDLP_EXTRACTOR_ARGS);
-    if (YTDLP_COOKIES) extraArgs.push("--cookies", YTDLP_COOKIES);
+    const cookiesInfo = resolveCookiesFile();
+    if (cookiesInfo && cookiesInfo.path) extraArgs.push("--cookies", cookiesInfo.path);
     const child = spawn(bin, [...extraArgs, ...args], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -235,6 +261,89 @@ function runYtDlp(args) {
       resolve(stdout.trim());
     });
   });
+}
+
+function runYtDlpToFile(args) {
+  return new Promise((resolve, reject) => {
+    const bin = resolveYtDlpBin();
+    if (YTDLP_BIN_CONFIG && !fs.existsSync(bin)) {
+      return reject(new Error(`YTDLP_BIN is set but file not found at: ${bin}`));
+    }
+    const extraArgs = [];
+    if (YTDLP_FORCE_IPV4) extraArgs.push("-4");
+    if (YTDLP_EXTRACTOR_ARGS) extraArgs.push("--extractor-args", YTDLP_EXTRACTOR_ARGS);
+    const cookiesInfo = resolveCookiesFile();
+    if (cookiesInfo && cookiesInfo.path) extraArgs.push("--cookies", cookiesInfo.path);
+    const ffmpeg = resolveFfmpegBin();
+    if (ffmpeg && fs.existsSync(ffmpeg)) {
+      extraArgs.push("--ffmpeg-location", ffmpeg);
+    }
+
+    const child = spawn(bin, [...extraArgs, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("yt-dlp timeout"));
+    }, REQUEST_TIMEOUT_MS);
+
+    child.stderr.on("data", d => { stderr += d.toString(); });
+    child.on("error", err => {
+      clearTimeout(timer);
+      if (err && err.code === "ENOENT") {
+        return reject(new Error("yt-dlp not found. Set YTDLP_BIN or add yt-dlp to PATH."));
+      }
+      reject(err);
+    });
+    child.on("close", code => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+      }
+      resolve();
+    });
+  });
+}
+
+async function downloadAndMergeWithYtDlp({ res, sourceUrl, formatId, title, ext }) {
+  const safeTitle = sanitizeFilename(title) || "download";
+  const fileExt = ext || "mp4";
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "xoxo-"));
+  const outPath = path.join(tmpDir, `${safeTitle}.${fileExt}`);
+
+  try {
+    await runYtDlpToFile([
+      "-f", formatId,
+      "--no-playlist",
+      "--merge-output-format", fileExt,
+      "-o", outPath,
+      sourceUrl
+    ]);
+
+    if (!fs.existsSync(outPath)) {
+      return res.status(500).json({ error: "Download failed to produce output file" });
+    }
+
+    res.setHeader("Content-Disposition", `attachment; filename=\"${safeTitle}.${fileExt}\"`);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Cache-Control", "no-store");
+
+    const stream = fs.createReadStream(outPath);
+    stream.on("error", (err) => {
+      if (!res.headersSent) {
+        res.status(502).json({ error: err.message || "Stream failed" });
+      } else {
+        res.destroy(err);
+      }
+    });
+    stream.on("close", () => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+    return stream.pipe(res);
+  } catch (err) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    return res.status(500).json({ error: err.message || "Merge download failed" });
+  }
 }
 
 function resolveYtDlpBin() {
@@ -275,6 +384,52 @@ function resolveBundledYtDlpBin() {
     // Optional dependency path resolution; fall back to env/PATH checks.
   }
   return "";
+}
+
+function resolveFfmpegBin() {
+  if (FFMPEG_BIN) return FFMPEG_BIN;
+  if (FFMPEG_DISABLE_STATIC) return "ffmpeg";
+
+  try {
+    const ffmpeg = require("ffmpeg-static");
+    if (typeof ffmpeg === "string" && fs.existsSync(ffmpeg)) {
+      return ffmpeg;
+    }
+  } catch (_err) {
+    // Optional dependency path resolution; fall back to PATH.
+  }
+  return "ffmpeg";
+}
+
+function resolveCookiesFile() {
+  if (YTDLP_COOKIES && fs.existsSync(YTDLP_COOKIES)) {
+    return { path: YTDLP_COOKIES, source: "file" };
+  }
+
+  if (YTDLP_COOKIES_TEXT) {
+    return { path: ensureCookiesFile(YTDLP_COOKIES_TEXT), source: "text" };
+  }
+
+  if (YTDLP_COOKIES_B64) {
+    try {
+      const text = Buffer.from(YTDLP_COOKIES_B64, "base64").toString("utf8");
+      if (text) return { path: ensureCookiesFile(text), source: "base64" };
+    } catch {
+      return { path: "", source: "invalid-base64" };
+    }
+  }
+
+  return { path: "", source: "none" };
+}
+
+function ensureCookiesFile(content) {
+  const dir = path.join(os.tmpdir(), "xoxo-cookies");
+  const file = path.join(dir, "cookies.txt");
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, content, "utf8");
+  }
+  return file;
 }
 
 function basicAuthMiddleware(req, res, next) {

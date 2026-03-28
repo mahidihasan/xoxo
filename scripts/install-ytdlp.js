@@ -5,6 +5,12 @@ const https = require("https");
 const BIN_DIR = path.join(process.cwd(), "bin");
 const platform = process.platform;
 
+const skipDownload = String(process.env.YTDLP_SKIP_DOWNLOAD || "false").toLowerCase() === "true";
+if (skipDownload) {
+  console.log("Skipping yt-dlp download (YTDLP_SKIP_DOWNLOAD=true).");
+  process.exit(0);
+}
+
 let filename = "yt-dlp";
 if (platform === "win32") filename = "yt-dlp.exe";
 else if (platform === "darwin") filename = "yt-dlp_macos";
