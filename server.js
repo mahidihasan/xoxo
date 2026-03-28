@@ -24,10 +24,12 @@ const FFMPEG_DISABLE_STATIC = String(process.env.FFMPEG_DISABLE_STATIC || "false
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
+const INFO_CACHE_TTL_MS = Number(process.env.INFO_CACHE_TTL_MS || 60_000);
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER || "";
 const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || "";
 
 const app = express();
+const infoCache = new Map();
 app.disable("x-powered-by");
 // Required behind reverse proxies (Render/Vercel) for correct client IP/rate-limit behavior.
 app.set("trust proxy", 1);
@@ -113,6 +115,12 @@ app.post("/api/info", async (req, res) => {
       return res.status(400).json({ error: "Invalid URL" });
     }
 
+    const cacheKey = `${type || "video"}|${url}`;
+    const cached = infoCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json(cached.payload);
+    }
+
     const infoRaw = await runYtDlp(["-J", "--no-playlist", url]);
     const info = JSON.parse(infoRaw);
 
@@ -121,18 +129,21 @@ app.post("/api/info", async (req, res) => {
     const duration = info.duration_string || formatDuration(info.duration);
     const thumb = info.thumbnail || null;
 
-    let formats = buildFormats(info, type || "video", url, title);
+    let formats = buildFormats(info, type || "video", url, title, platform);
     if (!Array.isArray(formats) || formats.length === 0) {
-      formats = buildDefaultFormats(type || "video", url, title, info);
+      formats = buildDefaultFormats(type || "video", url, title, info, platform);
     }
 
-    res.json({
+    const payload = {
       title,
       thumb,
       duration,
       platform,
       formats
-    });
+    };
+
+    infoCache.set(cacheKey, { payload, expiresAt: Date.now() + INFO_CACHE_TTL_MS });
+    res.json(payload);
   } catch (err) {
     const msg = err.message || "Failed to fetch media info";
     if (isYouTubeBlockedError(msg)) {
@@ -151,6 +162,8 @@ app.get("/api/download", async (req, res) => {
     const formatId = req.query.format;
     const title = req.query.title || "download";
     const ext = req.query.ext || "";
+    const type = req.query.type || "video";
+    const viaYtdlp = String(req.query.via || "").toLowerCase() === "ytdlp";
 
     let downloadUrl = null;
     let multiStream = false;
@@ -172,13 +185,16 @@ app.get("/api/download", async (req, res) => {
       }
     }
 
-    if (!direct && multiStream) {
+    const isM3U8 = isLikelyM3U8(downloadUrl);
+
+    if (!direct && (multiStream || viaYtdlp || isM3U8)) {
       return await downloadAndMergeWithYtDlp({
         res,
         sourceUrl,
         formatId: String(formatId),
         title,
         ext,
+        type,
       });
     }
 
@@ -189,8 +205,19 @@ app.get("/api/download", async (req, res) => {
 
     const filename = sanitizeFilename(title) + (ext ? "." + ext : "");
     res.setHeader("Content-Disposition", `attachment; filename=\"${filename}\"`);
-    if (resp.headers.get("content-type")) {
-      res.setHeader("Content-Type", resp.headers.get("content-type"));
+    const contentType = resp.headers.get("content-type");
+    if (contentType) {
+      res.setHeader("Content-Type", contentType);
+      if (!direct && isLikelyM3U8(downloadUrl, contentType)) {
+        return await downloadAndMergeWithYtDlp({
+          res,
+          sourceUrl,
+          formatId: String(formatId),
+          title,
+          ext,
+          type,
+        });
+      }
     }
     if (resp.headers.get("content-length")) {
       res.setHeader("Content-Length", resp.headers.get("content-length"));
@@ -305,20 +332,23 @@ function runYtDlpToFile(args) {
   });
 }
 
-async function downloadAndMergeWithYtDlp({ res, sourceUrl, formatId, title, ext }) {
+async function downloadAndMergeWithYtDlp({ res, sourceUrl, formatId, title, ext, type }) {
   const safeTitle = sanitizeFilename(title) || "download";
   const fileExt = ext || "mp4";
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "xoxo-"));
   const outPath = path.join(tmpDir, `${safeTitle}.${fileExt}`);
 
   try {
-    await runYtDlpToFile([
+    const args = [
       "-f", formatId,
       "--no-playlist",
-      "--merge-output-format", fileExt,
       "-o", outPath,
       sourceUrl
-    ]);
+    ];
+    if (type === "video" && fileExt) {
+      args.splice(4, 0, "--merge-output-format", fileExt);
+    }
+    await runYtDlpToFile(args);
 
     if (!fs.existsSync(outPath)) {
       return res.status(500).json({ error: "Download failed to produce output file" });
@@ -422,6 +452,31 @@ function resolveCookiesFile() {
   return { path: "", source: "none" };
 }
 
+function shouldUseYtdlpDownload(platform) {
+  const force = String(process.env.YTDLP_FORCE_DOWNLOAD || "false").toLowerCase() === "true";
+  const cookiesInfo = resolveCookiesFile();
+  if (force) return true;
+  if (cookiesInfo && cookiesInfo.path) return true;
+  if (!platform) return false;
+
+  const p = String(platform).toLowerCase();
+  return [
+    "pornhub",
+    "xvideos",
+    "xnxx",
+    "xhamster",
+    "youporn",
+    "redtube",
+    "tube8",
+    "spankbang",
+    "beeg",
+    "eporner",
+    "hentaifox",
+    "hanime",
+    "redgifs"
+  ].includes(p);
+}
+
 function ensureCookiesFile(content) {
   const dir = path.join(os.tmpdir(), "xoxo-cookies");
   const file = path.join(dir, "cookies.txt");
@@ -451,7 +506,9 @@ function basicAuthMiddleware(req, res, next) {
   return next();
 }
 
-function buildFormats(info, type, sourceUrl, title) {
+function buildFormats(info, type, sourceUrl, title, platform) {
+  const baseVia = shouldUseYtdlpDownload(platform) ? "&via=ytdlp" : "";
+  const typeParam = `&type=${encodeURIComponent(type)}`;
   if (type === "image") {
     const thumbs = Array.isArray(info.thumbnails) ? [...info.thumbnails] : [];
     if (info.thumbnail) {
@@ -462,7 +519,7 @@ function buildFormats(info, type, sourceUrl, title) {
       .sort((a, b) => (b.width || 0) - (a.width || 0));
     const list = uniqueBy(sorted, t => t.url).slice(0, 20);
     return list.map((t) => ({
-      url: `/api/download?direct=${encodeURIComponent(t.url)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(t.url) || "jpg")}`,
+      url: `/api/download?direct=${encodeURIComponent(t.url)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(t.url) || "jpg")}${typeParam}`,
       label: t.width ? `${t.width}px` : "Image",
       ext: guessExt(t.url) || "jpg",
       type: "image",
@@ -478,7 +535,7 @@ function buildFormats(info, type, sourceUrl, title) {
       .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))
       .slice(0, 20);
     return uniqueBy(audio, f => f.format_id).map((f) => ({
-      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(f.format_id)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || f.audio_ext || "m4a")}`,
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(f.format_id)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || f.audio_ext || "m4a")}${typeParam}${baseVia}`,
       label: f.abr ? `${Math.round(f.abr)} kbps` : "Audio",
       ext: f.ext || f.audio_ext || "m4a",
       type: "audio",
@@ -493,8 +550,9 @@ function buildFormats(info, type, sourceUrl, title) {
 
   return uniqueBy(selected, f => f.format_id).map((f) => {
     const formatSelector = (videoCombined.length || !videoOnly.length) ? f.format_id : `${f.format_id}+bestaudio/best`;
+    const via = (baseVia || isM3U8Format(f)) ? "&via=ytdlp" : "";
     return {
-      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(formatSelector)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || "mp4")}`,
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent(formatSelector)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(f.ext || "mp4")}${typeParam}${via}`,
       label: f.height ? `${f.height}p` : (f.format_note || "Video"),
       ext: f.ext || "mp4",
       type: "video",
@@ -502,10 +560,13 @@ function buildFormats(info, type, sourceUrl, title) {
   });
 }
 
-function buildDefaultFormats(type, sourceUrl, title, info) {
+function buildDefaultFormats(type, sourceUrl, title, info, platform) {
+  const useYtdlpDownload = shouldUseYtdlpDownload(platform);
+  const via = useYtdlpDownload ? "&via=ytdlp" : "";
+  const typeParam = `&type=${encodeURIComponent(type)}`;
   if (type === "audio") {
     return [{
-      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp3")}`,
+      url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp3")}${typeParam}${via}`,
       label: "Best audio",
       ext: "mp3",
       type: "audio",
@@ -516,7 +577,7 @@ function buildDefaultFormats(type, sourceUrl, title, info) {
     const thumb = info && info.thumbnail;
     if (thumb) {
       return [{
-        url: `/api/download?direct=${encodeURIComponent(thumb)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(thumb) || "jpg")}`,
+        url: `/api/download?direct=${encodeURIComponent(thumb)}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent(guessExt(thumb) || "jpg")}${typeParam}`,
         label: "Original",
         ext: guessExt(thumb) || "jpg",
         type: "image",
@@ -525,7 +586,7 @@ function buildDefaultFormats(type, sourceUrl, title, info) {
   }
 
   return [{
-    url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestvideo*+bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp4")}`,
+    url: `/api/download?url=${encodeURIComponent(sourceUrl)}&format=${encodeURIComponent("bestvideo*+bestaudio/best")}&title=${encodeURIComponent(title)}&ext=${encodeURIComponent("mp4")}${typeParam}${via}`,
     label: "Best available",
     ext: "mp4",
     type: "video",
@@ -679,4 +740,18 @@ function guessExt(url) {
     if (p && p.length <= 5) return p;
   } catch {}
   return "";
+}
+
+function isLikelyM3U8(url, contentType = "") {
+  const u = String(url || "").toLowerCase();
+  const ct = String(contentType || "").toLowerCase();
+  if (u.includes(".m3u8")) return true;
+  return ct.includes("application/vnd.apple.mpegurl") || ct.includes("application/x-mpegurl") || ct.includes("audio/mpegurl");
+}
+
+function isM3U8Format(format) {
+  if (!format) return false;
+  const protocol = String(format.protocol || "").toLowerCase();
+  const ext = String(format.ext || "").toLowerCase();
+  return protocol.includes("m3u8") || ext === "m3u8";
 }
