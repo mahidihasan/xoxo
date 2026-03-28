@@ -23,31 +23,39 @@ if (fs.existsSync(outPath)) {
 
 console.log(`Downloading yt-dlp from ${url}`);
 
-https.get(url, (res) => {
-  if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-    https.get(res.headers.location, handleResponse).on("error", onError);
-    return;
-  }
-  handleResponse(res);
-}).on("error", onError);
+downloadWithRedirects(url, 0);
 
-function handleResponse(res) {
-  if (res.statusCode !== 200) {
-    console.error(`Failed to download yt-dlp. HTTP ${res.statusCode}`);
+function downloadWithRedirects(currentUrl, depth) {
+  if (depth > 5) {
+    console.error("Failed to download yt-dlp. Too many redirects.");
     process.exit(1);
   }
 
-  const file = fs.createWriteStream(outPath);
-  res.pipe(file);
-  file.on("finish", () => {
-    file.close(() => {
-      if (platform !== "win32") {
-        fs.chmodSync(outPath, 0o755);
-      }
-      console.log(`yt-dlp saved to ${outPath}`);
+  https.get(currentUrl, { headers: { "User-Agent": "xoxo-downloader" } }, (res) => {
+    const status = res.statusCode || 0;
+    if (status >= 300 && status < 400 && res.headers.location) {
+      const nextUrl = new URL(res.headers.location, currentUrl).toString();
+      res.resume();
+      return downloadWithRedirects(nextUrl, depth + 1);
+    }
+
+    if (status !== 200) {
+      console.error(`Failed to download yt-dlp. HTTP ${status}`);
+      process.exit(1);
+    }
+
+    const file = fs.createWriteStream(outPath);
+    res.pipe(file);
+    file.on("finish", () => {
+      file.close(() => {
+        if (platform !== "win32") {
+          fs.chmodSync(outPath, 0o755);
+        }
+        console.log(`yt-dlp saved to ${outPath}`);
+      });
     });
-  });
-  file.on("error", onError);
+    file.on("error", onError);
+  }).on("error", onError);
 }
 
 function onError(err) {
